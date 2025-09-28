@@ -490,156 +490,223 @@ app.post('/chat', authenticateUser, async (req, res) => {
     const { message } = req.body;
     const userRole = req.user.role;
 
-    console.log(`Chat request from ${userRole}: "${message}"`);
+    const tools = [
+      {
+        type: 'function',
+        function: {
+          name: 'approve_visitor',
+          description: 'Approve a pending visitor by name',
+          parameters: {
+            type: 'object',
+            properties: {
+              visitorName: {
+                type: 'string',
+                description: 'The exact name of the visitor to approve'
+              }
+            },
+            required: ['visitorName'],
+            additionalProperties: false
+          }
+        }
+      },
+      {
+        type: 'function',
+        function: {
+          name: 'deny_visitor',
+          description: 'Deny a pending visitor by name with optional reason',
+          parameters: {
+            type: 'object',
+            properties: {
+              visitorName: {
+                type: 'string',
+                description: 'The exact name of the visitor to deny'
+              },
+              reason: {
+                type: 'string',
+                description: 'Optional reason for denial'
+              }
+            },
+            required: ['visitorName'],
+            additionalProperties: false
+          }
+        }
+      }
+    ];
 
-    // Input validation
-    if (!message || typeof message !== 'string') {
-      return res.json({
-        message: 'Please provide a valid message.',
-        success: false,
-        error: true
+    if (['guard', 'admin'].includes(userRole)) {
+      tools.push({
+        type: 'function',
+        function: {
+          name: 'checkin_visitor',
+          description: 'Check in an approved visitor by name',
+          parameters: {
+            type: 'object',
+            properties: {
+              visitorName: {
+                type: 'string',
+                description: 'The exact name of the visitor to check in'
+              }
+            },
+            required: ['visitorName'],
+            additionalProperties: false
+          }
+        }
+      });
+
+      tools.push({
+        type: 'function',
+        function: {
+          name: 'checkout_visitor',
+          description: 'Check out a checked-in visitor by name',
+          parameters: {
+            type: 'object',
+            properties: {
+              visitorName: {
+                type: 'string',
+                description: 'The exact name of the visitor to check out'
+              }
+            },
+            required: ['visitorName'],
+            additionalProperties: false
+          }
+        }
+      });
+
+      tools.push({
+        type: 'function',
+        function: {
+          name: 'request_approval',
+          description: 'Request approval for a visitor from resident',
+          parameters: {
+            type: 'object',
+            properties: {
+              visitorName: {
+                type: 'string',
+                description: 'The exact name of the visitor to request approval for'
+              }
+            },
+            required: ['visitorName'],
+            additionalProperties: false
+          }
+        }
       });
     }
 
-    // Simple pattern matching as fallback if OpenAI fails
-    const lowerMessage = message.toLowerCase().trim();
-    
-    // Extract visitor name from common patterns
-    let visitorName = null;
-    let action = null;
-    
-    if (lowerMessage.includes('approve')) {
-      action = 'approve';
-      visitorName = lowerMessage.replace(/approve\s+/i, '').trim();
-    } else if (lowerMessage.includes('deny')) {
-      action = 'deny';
-      visitorName = lowerMessage.replace(/deny\s+/i, '').trim();
-    } else if (lowerMessage.includes('check in')) {
-      action = 'checkin';
-      visitorName = lowerMessage.replace(/check\s+in\s+/i, '').trim();
-    } else if (lowerMessage.includes('check out')) {
-      action = 'checkout';
-      visitorName = lowerMessage.replace(/check\s+out\s+/i, '').trim();
-    }
+    const completion = await openai.chat.completions.create({
+      model: 'gpt-4o-mini',
+      messages: [
+        {
+          role: 'system',
+          content: `You are an AI assistant for a community gate management system. Help users manage visitors efficiently.
+          
+Current user role: ${userRole}
+Available actions:
+- Residents: add visitors, approve/deny visitors for their household
+- Guards: request approval from residents, check in/out approved visitors
+- Admins: all actions
 
-    // If we have a direct action, process it without OpenAI
-    if (action && visitorName) {
-      console.log(`Direct action detected: ${action} for visitor: ${visitorName}`);
-      
-      // Find visitor
+Be concise and helpful. Use the available functions to perform actions when requested.`
+        },
+        {
+          role: 'user',
+          content: message
+        }
+      ],
+      tools,
+      tool_choice: 'auto',
+      response_format: {
+        type: 'json_object'
+      }
+    });
+
+    const responseMessage = completion.choices[0].message;
+
+    if (responseMessage.tool_calls && responseMessage.tool_calls.length > 0) {
+      const toolCall = responseMessage.tool_calls[0];
+      const functionName = toolCall.function.name;
+      const functionArgs = JSON.parse(toolCall.function.arguments);
+
       let visitor = null;
-      try {
+      if (functionArgs.visitorName) {
         let visitorsQuery;
         
         if (userRole === 'resident') {
           visitorsQuery = db.collection('visitors')
-            .where('hostHouseholdId', '==', req.user.householdId);
+            .where('hostHouseholdId', '==', req.user.householdId)
+            .where('name', '>=', functionArgs.visitorName)
+            .where('name', '<=', functionArgs.visitorName + '\uf8ff')
+            .limit(1);
         } else {
-          visitorsQuery = db.collection('visitors');
+          visitorsQuery = db.collection('visitors')
+            .where('name', '>=', functionArgs.visitorName)
+            .where('name', '<=', functionArgs.visitorName + '\uf8ff')
+            .limit(1);
         }
         
         const visitorsSnap = await visitorsQuery.get();
-        
-        // Search for visitor by name (case-insensitive)
-        const visitorDoc = visitorsSnap.docs.find(doc => {
-          const data = doc.data();
-          return data.name && data.name.toLowerCase().includes(visitorName.toLowerCase());
-        });
-        
-        if (visitorDoc) {
-          visitor = { id: visitorDoc.id, ...visitorDoc.data() };
-          console.log(`Found visitor: ${visitor.name} (${visitor.id})`);
+        if (!visitorsSnap.empty) {
+          visitor = { id: visitorsSnap.docs[0].id, ...visitorsSnap.docs[0].data() };
         }
-      } catch (searchError) {
-        console.error('Error searching for visitor:', searchError);
-        return res.json({
-          message: `Error searching for visitor: ${searchError.message}`,
-          success: false,
-          error: true
-        });
       }
 
       if (!visitor) {
         return res.json({ 
-          message: `Visitor "${visitorName}" not found. Please check the name and try again.`,
+          message: `Visitor "${functionArgs.visitorName}" not found. Please check the name and try again.`,
           success: false
         });
       }
 
-      // Execute the action
       let result;
-      try {
-        switch (action) {
-          case 'approve':
-            if (!['resident', 'admin'].includes(userRole)) {
-              return res.json({
-                message: 'Only residents and admins can approve visitors.',
-                success: false
-              });
-            }
-            result = await executeApproval(visitor.id, req.user);
-            break;
-          case 'deny':
-            if (!['resident', 'admin'].includes(userRole)) {
-              return res.json({
-                message: 'Only residents and admins can deny visitors.',
-                success: false
-              });
-            }
-            // Extract reason from message if present
-            const reason = lowerMessage.includes('due to') ? 
-              lowerMessage.split('due to')[1]?.trim() : '';
-            result = await executeDenial(visitor.id, reason, req.user);
-            break;
-          case 'checkin':
-            if (!['guard', 'admin'].includes(userRole)) {
-              return res.json({
-                message: 'Only guards and admins can check in visitors.',
-                success: false
-              });
-            }
-            result = await executeCheckin(visitor.id, req.user);
-            break;
-          case 'checkout':
-            if (!['guard', 'admin'].includes(userRole)) {
-              return res.json({
-                message: 'Only guards and admins can check out visitors.',
-                success: false
-              });
-            }
-            result = await executeCheckout(visitor.id, req.user);
-            break;
-          default:
-            result = { success: false, message: 'Unknown action' };
-        }
-
-        return res.json({
-          message: result.message,
-          action: action,
-          success: result.success,
-          visitorName: visitor.name
-        });
-      } catch (actionError) {
-        console.error(`Error executing ${action}:`, actionError);
-        return res.json({
-          message: `Error executing ${action}: ${actionError.message}`,
-          success: false,
-          error: true
-        });
+      switch (functionName) {
+        case 'approve_visitor':
+          result = await executeApproval(visitor.id, req.user);
+          break;
+        case 'deny_visitor':
+          result = await executeDenial(visitor.id, functionArgs.reason, req.user);
+          break;
+        case 'checkin_visitor':
+          result = await executeCheckin(visitor.id, req.user);
+          break;
+        case 'checkout_visitor':
+          result = await executeCheckout(visitor.id, req.user);
+          break;
+        case 'request_approval':
+          result = await executeRequestApproval(visitor.id, req.user);
+          break;
+        default:
+          result = { success: false, message: 'Unknown action' };
       }
+
+      res.json({
+        message: result.message,
+        action: functionName,
+        success: result.success,
+        visitorName: visitor.name
+      });
+    } else {
+      let responseContent;
+      try {
+        const jsonResponse = JSON.parse(responseMessage.content);
+        responseContent = jsonResponse.message || responseMessage.content;
+      } catch {
+        responseContent = responseMessage.content || "I'm here to help you manage visitors. Try commands like 'approve John' or 'check in Mary'.";
+      }
+
+      res.json({ 
+        message: responseContent,
+        success: true 
+      });
     }
-
-    // Fallback response for non-action messages
-    return res.json({
-      message: `I understand you said "${message}". Try specific commands like:\n• "approve [name]" to approve a visitor\n• "deny [name]" to deny a visitor\n• "check in [name]" to check in a visitor (guards/admin)\n• "check out [name]" to check out a visitor (guards/admin)`,
-      success: true
-    });
-
   } catch (error) {
     console.error('Error processing chat:', error);
     
-    return res.json({ 
-      message: `Sorry, there was an error processing your request: ${error.message}`,
+    let errorMessage = 'Sorry, I encountered an error processing your request.';
+    if (error.message.includes('OpenAI')) {
+      errorMessage = 'AI service is temporarily unavailable. Please try the manual buttons instead.';
+    }
+    
+    res.json({ 
+      message: errorMessage,
       success: false,
       error: true 
     });

@@ -1,30 +1,36 @@
-import React from 'react';
+import React, { useState } from 'react';
 import ApiService from '../services/api';
-import { CheckCircle, XCircle, LogIn, LogOut, Clock, Shield, Users, Activity } from 'lucide-react';
+import { CheckCircle, XCircle, LogIn, LogOut, Clock, Shield, Users, Activity, Bell, MessageCircle } from 'lucide-react';
 
-const GuardPanel = ({ visitors }) => {
-  const handleApprove = async (visitorId) => {
-    try {
-      await ApiService.approveVisitor(visitorId);
-    } catch (error) {
-      console.error('Error approving visitor:', error);
-      alert('Error approving visitor: ' + error.message);
-    }
+const GuardPanel = ({ visitors, refreshVisitors }) => {
+  const [notificationMessage, setNotificationMessage] = useState('');
+  const [showNotificationModal, setShowNotificationModal] = useState(false);
+  const [selectedVisitor, setSelectedVisitor] = useState(null);
+
+  const handleNotifyResident = async (visitor) => {
+    setSelectedVisitor(visitor);
+    setNotificationMessage(`${visitor.name} is at the gate and would like to enter. Please approve or deny entry.`);
+    setShowNotificationModal(true);
   };
 
-  const handleDeny = async (visitorId) => {
-    const reason = prompt('Reason for denial (optional):');
+  const sendNotification = async () => {
     try {
-      await ApiService.denyVisitor(visitorId, reason);
+      await ApiService.requestApproval(selectedVisitor.id);
+      setShowNotificationModal(false);
+      setNotificationMessage('');
+      setSelectedVisitor(null);
+      if (refreshVisitors) refreshVisitors();
+      alert('Notification sent to resident successfully!');
     } catch (error) {
-      console.error('Error denying visitor:', error);
-      alert('Error denying visitor: ' + error.message);
+      console.error('Error sending notification:', error);
+      alert('Error sending notification: ' + error.message);
     }
   };
 
   const handleCheckin = async (visitorId) => {
     try {
       await ApiService.checkinVisitor(visitorId);
+      if (refreshVisitors) refreshVisitors();
     } catch (error) {
       console.error('Error checking in visitor:', error);
       alert('Error checking in visitor: ' + error.message);
@@ -34,6 +40,7 @@ const GuardPanel = ({ visitors }) => {
   const handleCheckout = async (visitorId) => {
     try {
       await ApiService.checkoutVisitor(visitorId);
+      if (refreshVisitors) refreshVisitors();
     } catch (error) {
       console.error('Error checking out visitor:', error);
       alert('Error checking out visitor: ' + error.message);
@@ -121,7 +128,7 @@ const GuardPanel = ({ visitors }) => {
 
         {/* Main Content Grid */}
         <div className="grid grid-cols-1 xl:grid-cols-3 gap-8">
-          {/* Pending Approvals */}
+          {/* Pending Approval - Guards can notify residents */}
           <div className="bg-white rounded-2xl shadow-sm border border-gray-100 overflow-hidden">
             <div className="bg-gradient-to-r from-yellow-400 to-orange-500 px-6 py-4">
               <h3 className="text-lg font-semibold text-white flex items-center">
@@ -141,20 +148,13 @@ const GuardPanel = ({ visitors }) => {
                         Scheduled: {formatDateTime(visitor.scheduledTime)}
                       </p>
                     </div>
-                    <div className="flex space-x-2">
-                      <button
-                        onClick={() => handleApprove(visitor.id)}
-                        className="flex-1 px-3 py-2 bg-green-600 text-white text-sm font-medium rounded-lg hover:bg-green-700 transition-colors"
-                      >
-                        Approve
-                      </button>
-                      <button
-                        onClick={() => handleDeny(visitor.id)}
-                        className="flex-1 px-3 py-2 bg-red-600 text-white text-sm font-medium rounded-lg hover:bg-red-700 transition-colors"
-                      >
-                        Deny
-                      </button>
-                    </div>
+                    <button
+                      onClick={() => handleNotifyResident(visitor)}
+                      className="w-full flex items-center justify-center px-4 py-2 bg-indigo-600 text-white text-sm font-medium rounded-lg hover:bg-indigo-700 transition-colors"
+                    >
+                      <Bell className="h-4 w-4 mr-2" />
+                      Notify Resident
+                    </button>
                   </div>
                 </div>
               ))}
@@ -183,8 +183,8 @@ const GuardPanel = ({ visitors }) => {
                       <h4 className="font-semibold text-gray-900">{visitor.name}</h4>
                       <p className="text-sm text-gray-600">{visitor.phone}</p>
                       <p className="text-sm text-gray-500">{visitor.purpose}</p>
-                      <p className="text-xs text-gray-400">
-                        Approved: {formatDateTime(visitor.approvedAt)}
+                      <p className="text-xs text-green-600 font-medium">
+                        ✓ Approved: {formatDateTime(visitor.approvedAt)}
                       </p>
                     </div>
                     <button
@@ -222,7 +222,7 @@ const GuardPanel = ({ visitors }) => {
                       <h4 className="font-semibold text-gray-900">{visitor.name}</h4>
                       <p className="text-sm text-gray-600">{visitor.phone}</p>
                       <p className="text-sm text-gray-500">{visitor.purpose}</p>
-                      <p className="text-xs text-gray-400">
+                      <p className="text-xs text-blue-600 font-medium">
                         Entered: {formatDateTime(visitor.checkedInAt)}
                       </p>
                     </div>
@@ -260,6 +260,7 @@ const GuardPanel = ({ visitors }) => {
                   <th className="px-6 py-4 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Purpose</th>
                   <th className="px-6 py-4 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Status</th>
                   <th className="px-6 py-4 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Time</th>
+                  <th className="px-6 py-4 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Actions</th>
                 </tr>
               </thead>
               <tbody className="bg-white divide-y divide-gray-200">
@@ -288,6 +289,34 @@ const GuardPanel = ({ visitors }) => {
                     <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
                       {formatDateTime(visitor.scheduledTime)}
                     </td>
+                    <td className="px-6 py-4 whitespace-nowrap text-sm font-medium">
+                      <div className="flex space-x-2">
+                        {visitor.status === 'pending' && (
+                          <button
+                            onClick={() => handleNotifyResident(visitor)}
+                            className="text-indigo-600 hover:text-indigo-900 transition-colors"
+                          >
+                            <Bell className="h-4 w-4" />
+                          </button>
+                        )}
+                        {visitor.status === 'approved' && (
+                          <button
+                            onClick={() => handleCheckin(visitor.id)}
+                            className="text-blue-600 hover:text-blue-900 transition-colors"
+                          >
+                            <LogIn className="h-4 w-4" />
+                          </button>
+                        )}
+                        {visitor.status === 'checked_in' && (
+                          <button
+                            onClick={() => handleCheckout(visitor.id)}
+                            className="text-gray-600 hover:text-gray-900 transition-colors"
+                          >
+                            <LogOut className="h-4 w-4" />
+                          </button>
+                        )}
+                      </div>
+                    </td>
                   </tr>
                 ))}
               </tbody>
@@ -301,6 +330,59 @@ const GuardPanel = ({ visitors }) => {
             )}
           </div>
         </div>
+
+        {/* Notification Modal */}
+        {showNotificationModal && (
+          <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
+            <div className="bg-white rounded-2xl max-w-md w-full p-6">
+              <div className="flex items-center space-x-3 mb-4">
+                <div className="p-2 bg-indigo-100 rounded-lg">
+                  <MessageCircle className="h-5 w-5 text-indigo-600" />
+                </div>
+                <h3 className="text-lg font-semibold text-gray-900">Notify Resident</h3>
+              </div>
+              
+              {selectedVisitor && (
+                <div className="mb-4 p-3 bg-gray-50 rounded-lg">
+                  <p className="text-sm text-gray-600">Visitor: <span className="font-medium text-gray-900">{selectedVisitor.name}</span></p>
+                  <p className="text-sm text-gray-600">Phone: <span className="font-medium text-gray-900">{selectedVisitor.phone}</span></p>
+                </div>
+              )}
+              
+              <div className="mb-4">
+                <label className="block text-sm font-medium text-gray-700 mb-2">
+                  Message to Resident
+                </label>
+                <textarea
+                  value={notificationMessage}
+                  onChange={(e) => setNotificationMessage(e.target.value)}
+                  className="w-full p-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500"
+                  rows={3}
+                  placeholder="Enter your message..."
+                />
+              </div>
+              
+              <div className="flex space-x-3">
+                <button
+                  onClick={() => {
+                    setShowNotificationModal(false);
+                    setSelectedVisitor(null);
+                    setNotificationMessage('');
+                  }}
+                  className="flex-1 px-4 py-2 border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50 transition-colors"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={sendNotification}
+                  className="flex-1 px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 transition-colors"
+                >
+                  Send Notification
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );
