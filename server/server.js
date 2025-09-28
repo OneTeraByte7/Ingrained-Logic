@@ -63,7 +63,7 @@ app.post('/addVisitor', authenticateUser, async (req, res) => {
       name,
       phone,
       purpose: purpose || '',
-      scheduledTime: scheduledTime ? admin.firestore.Timestamp.fromDate(new Date(scheduledTime)) : null,
+      scheduledTime: scheduledTime ? new Date(scheduledTime) : null,
       hostHouseholdId: req.user.householdId,
       hostUserId: req.user.uid,
       createdBy: req.user.uid,

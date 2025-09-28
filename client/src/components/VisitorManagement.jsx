@@ -111,16 +111,41 @@ const ResidentVisitorManagement = () => {
   };
 
   const formatDateTime = (timestamp) => {
-    if (!timestamp) return 'Not scheduled';
-    const date = timestamp.seconds ? new Date(timestamp.seconds * 1000) : new Date(timestamp);
-    return date.toLocaleString('en-US', {
-      year: 'numeric',
-      month: 'short',
-      day: 'numeric',
-      hour: '2-digit',
-      minute: '2-digit'
-    });
-  };
+  if (!timestamp) return 'Not scheduled';
+
+  let date;
+
+  if (timestamp.seconds) {
+    // Firestore Timestamp
+    date = new Date(timestamp.seconds * 1000);
+  } else if (timestamp._seconds) {
+    // Raw proto Timestamp object
+    date = new Date(timestamp._seconds * 1000);
+  } else if (timestamp.toDate) {
+    // Firestore Timestamp object
+    date = timestamp.toDate();
+  } else if (typeof timestamp === 'string' || typeof timestamp === 'number') {
+    date = new Date(timestamp);
+  } else if (timestamp instanceof Date) {
+    date = timestamp;
+  } else {
+    console.error("Unsupported timestamp type:", timestamp);
+    return "Invalid date";
+  }
+
+  if (isNaN(date.getTime())) {
+    console.error("Failed to parse date:", date, "from input:", timestamp);
+    return 'Invalid date';
+  }
+
+  return date.toLocaleString('en-US', {
+    year: 'numeric',
+    month: 'short',
+    day: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit'
+  });
+};
 
   // Filter visitors based on active tab
   const filteredVisitors = visitors.filter(visitor => {
