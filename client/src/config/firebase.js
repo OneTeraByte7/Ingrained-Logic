@@ -4,22 +4,46 @@ import { getFirestore } from 'firebase/firestore';
 import { getMessaging, getToken, onMessage } from 'firebase/messaging';
 
 const firebaseConfig = {
-  apiKey: "AIzaSyCy8uHLAb1IFZ7VFYKNpJmEhJR56aKI6Ok",
-  authDomain: "community-guard-23464.firebaseapp.com",
-  projectId: "community-guard-23464",
-  storageBucket: "community-guard-23464.firebasestorage.app",
-  messagingSenderId: "540945410471",
-  appId: "1:540945410471:web:1fdf3cad5de85508c4ee82",
-  measurementId: "G-ZJLCZFFVCB"
+  apiKey: process.env.REACT_APP_FIREBASE_API_KEY || "demo-api-key",
+  authDomain: process.env.REACT_APP_FIREBASE_AUTH_DOMAIN || "demo-project.firebaseapp.com",
+  projectId: process.env.REACT_APP_FIREBASE_PROJECT_ID || "demo-project",
+  storageBucket: process.env.REACT_APP_FIREBASE_STORAGE_BUCKET || "demo-project.appspot.com",
+  messagingSenderId: process.env.REACT_APP_FIREBASE_MESSAGING_SENDER_ID || "123456789",
+  appId: process.env.REACT_APP_FIREBASE_APP_ID || "1:123456789:web:demo"
 };
+
+if (!process.env.REACT_APP_FIREBASE_API_KEY) {
+  console.warn('Firebase configuration not found. Please create a .env file with your Firebase config.');
+}
 
 const app = initializeApp(firebaseConfig);
 export const auth = getAuth(app);
 export const db = getFirestore(app);
-export const messaging = getMessaging(app);
+
+let messaging = null;
+try {
+  if (typeof window !== 'undefined' && 'serviceWorker' in navigator) {
+    messaging = getMessaging(app);
+  }
+} catch (error) {
+  console.warn('Firebase Messaging not available:', error.message);
+}
+
+export { messaging };
 
 export const getFCMToken = async () => {
+  if (!messaging) {
+    console.warn('Messaging not initialized');
+    return null;
+  }
+
   try {
+    const currentUser = auth.currentUser;
+    if (!currentUser) {
+      console.warn('User not authenticated for FCM token');
+      return null;
+    }
+
     const token = await getToken(messaging, {
       vapidKey: process.env.REACT_APP_FIREBASE_VAPID_KEY
     });
@@ -30,9 +54,12 @@ export const getFCMToken = async () => {
   }
 };
 
-export const onMessageListener = () =>
-  new Promise((resolve) => {
+export const onMessageListener = () => {
+  if (!messaging) return Promise.resolve();
+  
+  return new Promise((resolve) => {
     onMessage(messaging, (payload) => {
       resolve(payload);
     });
   });
+};

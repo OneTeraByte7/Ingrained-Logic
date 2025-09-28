@@ -1,13 +1,11 @@
-import React, { useState } from 'react';
-import { collection, addDoc } from 'firebase/firestore';
-import { db } from '../config/firebase';
-import { useAuth } from '../context/AuthContext';
+import React, { useState, useEffect } from 'react';
 import ApiService from '../services/api';
-import { Plus, Clock, CheckCircle, XCircle, User, Phone, FileText, Calendar, X } from 'lucide-react';
+import { Plus, Clock, CheckCircle, XCircle, User, Phone, FileText, Calendar, X, Eye, EyeOff } from 'lucide-react';
 
-const VisitorManagement = ({ visitors }) => {
-  const { user, householdId } = useAuth();
+const ResidentVisitorManagement = () => {
+  const [visitors, setVisitors] = useState([]);
   const [showAddForm, setShowAddForm] = useState(false);
+  const [activeTab, setActiveTab] = useState('my-visitors');
   const [newVisitor, setNewVisitor] = useState({
     name: '',
     phone: '',
@@ -16,32 +14,42 @@ const VisitorManagement = ({ visitors }) => {
   });
   const [loading, setLoading] = useState(false);
 
+  // Fetch visitors from API based on user role
+  const fetchVisitors = async () => {
+    try {
+      const response = await ApiService.getVisitors();
+      setVisitors(response.visitors || []);
+    } catch (error) {
+      console.error('Error fetching visitors:', error);
+    }
+  };
+
+  useEffect(() => {
+    fetchVisitors();
+    // Poll for updates every 10 seconds
+    const interval = setInterval(fetchVisitors, 10000);
+    return () => clearInterval(interval);
+  }, []);
+
   const handleAddVisitor = async (e) => {
     e.preventDefault();
     setLoading(true);
 
     try {
-      await addDoc(collection(db, 'visitors'), {
-        ...newVisitor,
-        hostHouseholdId: householdId,
-        createdBy: user.uid,
-        status: 'pending',
-        createdAt: new Date(),
-        scheduledTime: new Date(newVisitor.scheduledTime)
+      await ApiService.addVisitor({
+        name: newVisitor.name,
+        phone: newVisitor.phone,
+        purpose: newVisitor.purpose,
+        scheduledTime: newVisitor.scheduledTime
       });
 
-      await addDoc(collection(db, 'events'), {
-        type: 'visitor_created',
-        actorUserId: user.uid,
-        subjectId: 'pending',
-        payload: { visitorName: newVisitor.name },
-        timestamp: new Date()
-      });
-
+      // Refresh the visitor list
+      fetchVisitors();
       setNewVisitor({ name: '', phone: '', purpose: '', scheduledTime: '' });
       setShowAddForm(false);
     } catch (error) {
       console.error('Error adding visitor:', error);
+      alert(`Error adding visitor: ${error.message}`);
     } finally {
       setLoading(false);
     }
@@ -50,8 +58,10 @@ const VisitorManagement = ({ visitors }) => {
   const handleApprove = async (visitorId) => {
     try {
       await ApiService.approveVisitor(visitorId);
+      fetchVisitors(); // Refresh the list
     } catch (error) {
       console.error('Error approving visitor:', error);
+      alert(`Error approving visitor: ${error.message}`);
     }
   };
 
@@ -59,8 +69,10 @@ const VisitorManagement = ({ visitors }) => {
     const reason = prompt('Reason for denial (optional):');
     try {
       await ApiService.denyVisitor(visitorId, reason);
+      fetchVisitors(); // Refresh the list
     } catch (error) {
       console.error('Error denying visitor:', error);
+      alert(`Error denying visitor: ${error.message}`);
     }
   };
 
@@ -110,13 +122,23 @@ const VisitorManagement = ({ visitors }) => {
     });
   };
 
+  // Filter visitors based on active tab
+  const filteredVisitors = visitors.filter(visitor => {
+    if (activeTab === 'my-visitors') {
+      return true; // API already filters by household
+    } else if (activeTab === 'pending-approval') {
+      return visitor.status === 'pending';
+    }
+    return true;
+  });
+
   return (
     <div className="p-8 bg-gray-50 min-h-full">
       <div className="max-w-7xl mx-auto">
         <div className="flex justify-between items-center mb-8">
           <div>
             <h1 className="text-3xl font-bold text-gray-900">Visitor Management</h1>
-            <p className="mt-2 text-sm text-gray-600">Manage and track all visitors to your community</p>
+            <p className="mt-2 text-sm text-gray-600">Manage and track visitors to your household</p>
           </div>
           <button
             onClick={() => setShowAddForm(true)}
@@ -127,6 +149,41 @@ const VisitorManagement = ({ visitors }) => {
           </button>
         </div>
 
+        {/* Tab Navigation */}
+        <div className="mb-8">
+          <div className="border-b border-gray-200">
+            <nav className="-mb-px flex space-x-8">
+              <button
+                onClick={() => setActiveTab('my-visitors')}
+                className={`py-4 px-1 border-b-2 font-medium text-sm transition-colors ${
+                  activeTab === 'my-visitors'
+                    ? 'border-indigo-500 text-indigo-600'
+                    : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
+                }`}
+              >
+                <div className="flex items-center">
+                  <Eye className="w-4 h-4 mr-2" />
+                  My Visitors ({visitors.length})
+                </div>
+              </button>
+              <button
+                onClick={() => setActiveTab('pending-approval')}
+                className={`py-4 px-1 border-b-2 font-medium text-sm transition-colors ${
+                  activeTab === 'pending-approval'
+                    ? 'border-indigo-500 text-indigo-600'
+                    : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
+                }`}
+              >
+                <div className="flex items-center">
+                  <Clock className="w-4 h-4 mr-2" />
+                  Pending Approval ({visitors.filter(v => v.status === 'pending').length})
+                </div>
+              </button>
+            </nav>
+          </div>
+        </div>
+
+        {/* Add Visitor Form */}
         {showAddForm && (
           <div className="mb-8 bg-white rounded-2xl shadow-xl border border-gray-100 overflow-hidden">
             <div className="bg-gradient-to-r from-indigo-600 to-purple-600 px-8 py-6 flex justify-between items-center">
@@ -146,7 +203,7 @@ const VisitorManagement = ({ visitors }) => {
               <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
                 <div className="space-y-2">
                   <label className="block text-sm font-semibold text-gray-700 mb-3">
-                    Visitor Name
+                    Visitor Name *
                   </label>
                   <div className="relative">
                     <div className="absolute inset-y-0 left-0 pl-4 flex items-center pointer-events-none">
@@ -165,7 +222,7 @@ const VisitorManagement = ({ visitors }) => {
 
                 <div className="space-y-2">
                   <label className="block text-sm font-semibold text-gray-700 mb-3">
-                    Phone Number
+                    Phone Number *
                   </label>
                   <div className="relative">
                     <div className="absolute inset-y-0 left-0 pl-4 flex items-center pointer-events-none">
@@ -192,7 +249,6 @@ const VisitorManagement = ({ visitors }) => {
                     </div>
                     <input
                       type="text"
-                      required
                       className="block w-full pl-12 pr-4 py-4 text-base border border-gray-200 rounded-xl focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 transition-all duration-200 bg-gray-50 focus:bg-white"
                       placeholder="e.g., Delivery, Meeting, Personal visit"
                       value={newVisitor.purpose}
@@ -211,7 +267,6 @@ const VisitorManagement = ({ visitors }) => {
                     </div>
                     <input
                       type="datetime-local"
-                      required
                       className="block w-full pl-12 pr-4 py-4 text-base border border-gray-200 rounded-xl focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 transition-all duration-200 bg-gray-50 focus:bg-white"
                       value={newVisitor.scheduledTime}
                       onChange={(e) => setNewVisitor({ ...newVisitor, scheduledTime: e.target.value })}
@@ -247,8 +302,9 @@ const VisitorManagement = ({ visitors }) => {
           </div>
         )}
 
+        {/* Visitors List */}
         <div className="grid gap-6">
-          {visitors.map((visitor) => (
+          {filteredVisitors.map((visitor) => (
             <div key={visitor.id} className="bg-white rounded-2xl shadow-sm border border-gray-100 hover:shadow-lg transition-all duration-300 overflow-hidden">
               <div className="p-6">
                 <div className="flex items-start justify-between">
@@ -265,20 +321,28 @@ const VisitorManagement = ({ visitors }) => {
                               <Phone className="h-4 w-4 mr-2 text-gray-400" />
                               <span className="text-sm">{visitor.phone}</span>
                             </div>
-                            <div className="flex items-center text-gray-600">
-                              <FileText className="h-4 w-4 mr-2 text-gray-400" />
-                              <span className="text-sm">{visitor.purpose}</span>
-                            </div>
+                            {visitor.purpose && (
+                              <div className="flex items-center text-gray-600">
+                                <FileText className="h-4 w-4 mr-2 text-gray-400" />
+                                <span className="text-sm">{visitor.purpose}</span>
+                              </div>
+                            )}
                             <div className="flex items-center text-gray-600">
                               <Calendar className="h-4 w-4 mr-2 text-gray-400" />
                               <span className="text-sm">{formatDateTime(visitor.scheduledTime)}</span>
                             </div>
+                            {visitor.createdAt && (
+                              <div className="flex items-center text-gray-500 text-xs mt-2">
+                                <span>Added: {formatDateTime(visitor.createdAt)}</span>
+                              </div>
+                            )}
                           </div>
                         </div>
                         <div className="flex flex-col items-end space-y-3 ml-6">
                           <span className={`px-4 py-2 text-sm font-semibold rounded-full border ${getStatusColor(visitor.status)}`}>
                             {visitor.status.replace('_', ' ').toUpperCase()}
                           </span>
+                          
                           {visitor.status === 'pending' && (
                             <div className="flex space-x-2">
                               <button
@@ -295,6 +359,24 @@ const VisitorManagement = ({ visitors }) => {
                               </button>
                             </div>
                           )}
+
+                          {visitor.status === 'approved' && (
+                            <div className="text-sm text-green-600 font-medium">
+                              Ready for check-in
+                            </div>
+                          )}
+
+                          {visitor.status === 'checked_in' && (
+                            <div className="text-sm text-blue-600 font-medium">
+                              Currently on premises
+                            </div>
+                          )}
+
+                          {visitor.status === 'denied' && visitor.denialReason && (
+                            <div className="text-sm text-red-600 bg-red-50 px-3 py-1 rounded-lg">
+                              Reason: {visitor.denialReason}
+                            </div>
+                          )}
                         </div>
                       </div>
                     </div>
@@ -304,21 +386,32 @@ const VisitorManagement = ({ visitors }) => {
             </div>
           ))}
           
-          {visitors.length === 0 && (
+          {filteredVisitors.length === 0 && (
             <div className="text-center py-16 bg-white rounded-2xl shadow-sm border border-gray-100">
               <div className="mx-auto w-24 h-24 bg-gray-100 rounded-full flex items-center justify-center mb-6">
                 <User className="h-12 w-12 text-gray-400" />
               </div>
-              <h3 className="text-lg font-semibold text-gray-900 mb-2">No visitors yet</h3>
-              <p className="text-gray-600 mb-6 max-w-sm mx-auto">
-                Add your first visitor to start managing entries to your community
-              </p>
-              <button
-                onClick={() => setShowAddForm(true)}
-                className="px-6 py-3 bg-indigo-600 text-white rounded-xl hover:bg-indigo-700 transition-colors duration-200 font-medium"
-              >
-                Add First Visitor
-              </button>
+              {activeTab === 'my-visitors' ? (
+                <>
+                  <h3 className="text-lg font-semibold text-gray-900 mb-2">No visitors yet</h3>
+                  <p className="text-gray-600 mb-6 max-w-sm mx-auto">
+                    Add your first visitor to start managing entries to your household
+                  </p>
+                  <button
+                    onClick={() => setShowAddForm(true)}
+                    className="px-6 py-3 bg-indigo-600 text-white rounded-xl hover:bg-indigo-700 transition-colors duration-200 font-medium"
+                  >
+                    Add First Visitor
+                  </button>
+                </>
+              ) : (
+                <>
+                  <h3 className="text-lg font-semibold text-gray-900 mb-2">No pending approvals</h3>
+                  <p className="text-gray-600 mb-6 max-w-sm mx-auto">
+                    All visitors have been approved or denied
+                  </p>
+                </>
+              )}
             </div>
           )}
         </div>
@@ -327,4 +420,4 @@ const VisitorManagement = ({ visitors }) => {
   );
 };
 
-export default VisitorManagement;
+export default ResidentVisitorManagement;

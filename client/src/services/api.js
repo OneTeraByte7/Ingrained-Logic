@@ -31,6 +31,29 @@ class ApiService {
     return response.json();
   }
 
+  // NEW: Get visitors based on user role
+  async getVisitors() {
+    return this.makeRequest('/visitors', {
+      method: 'GET'
+    });
+  }
+
+  // NEW: Add visitor
+  async addVisitor(visitorData) {
+    return this.makeRequest('/addVisitor', {
+      method: 'POST',
+      body: JSON.stringify(visitorData)
+    });
+  }
+
+  // NEW: Request approval (for guards)
+  async requestApproval(visitorId) {
+    return this.makeRequest('/requestApproval', {
+      method: 'POST',
+      body: JSON.stringify({ visitorId })
+    });
+  }
+
   async approveVisitor(visitorId) {
     return this.makeRequest('/approveVisitor', {
       method: 'POST',

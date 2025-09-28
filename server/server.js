@@ -44,6 +44,176 @@ app.get('/health', (req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
+// NEW: Resident can add visitor
+app.post('/addVisitor', authenticateUser, async (req, res) => {
+  try {
+    const { name, phone, purpose, scheduledTime } = req.body;
+    const userRole = req.user.role;
+
+    if (!['resident', 'admin'].includes(userRole)) {
+      return res.status(403).json({ error: 'Only residents can add visitors' });
+    }
+
+    // Input validation
+    if (!name || !phone) {
+      return res.status(400).json({ error: 'Name and phone are required' });
+    }
+
+    const visitorData = {
+      name,
+      phone,
+      purpose: purpose || '',
+      scheduledTime: scheduledTime ? admin.firestore.Timestamp.fromDate(new Date(scheduledTime)) : null,
+      hostHouseholdId: req.user.householdId,
+      hostUserId: req.user.uid,
+      createdBy: req.user.uid,
+      status: 'pending',
+      createdAt: admin.firestore.FieldValue.serverTimestamp()
+    };
+
+    const visitorRef = await db.collection('visitors').add(visitorData);
+
+    // Log event
+    await db.collection('events').add({
+      type: 'visitor_added',
+      actorUserId: req.user.uid,
+      subjectId: visitorRef.id,
+      payload: { visitorName: name },
+      timestamp: admin.firestore.FieldValue.serverTimestamp()
+    });
+
+    // Notify guards about new visitor request
+    const message = {
+      notification: {
+        title: 'New Visitor Request',
+        body: `${name} is requesting to visit. Please check for approval.`
+      },
+      topic: 'guards',
+      data: {
+        visitorId: visitorRef.id,
+        action: 'visitor_request'
+      }
+    };
+
+    await messaging.send(message);
+
+    res.json({ 
+      success: true, 
+      message: 'Visitor added successfully',
+      visitorId: visitorRef.id 
+    });
+  } catch (error) {
+    console.error('Error adding visitor:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// NEW: Get visitors based on user role
+app.get('/visitors', authenticateUser, async (req, res) => {
+  try {
+    const userRole = req.user.role;
+    let visitorsQuery;
+
+    if (userRole === 'resident') {
+      // Residents see only their own visitors
+      visitorsQuery = db.collection('visitors')
+        .where('hostHouseholdId', '==', req.user.householdId);
+    } else if (userRole === 'guard') {
+      // Guards see approved visitors for check-in/out
+      visitorsQuery = db.collection('visitors')
+        .where('status', 'in', ['approved', 'checked_in']);
+    } else if (userRole === 'admin') {
+      // Admins see all visitors
+      visitorsQuery = db.collection('visitors');
+    } else {
+      return res.status(403).json({ error: 'Insufficient permissions' });
+    }
+
+    const visitorsSnap = await visitorsQuery.get();
+    let visitors = visitorsSnap.docs.map(doc => ({
+      id: doc.id,
+      ...doc.data(),
+      createdAt: doc.data().createdAt?.toDate(),
+      approvedAt: doc.data().approvedAt?.toDate(),
+      deniedAt: doc.data().deniedAt?.toDate(),
+      checkedInAt: doc.data().checkedInAt?.toDate(),
+      checkedOutAt: doc.data().checkedOutAt?.toDate()
+    }));
+
+    // Sort by createdAt in JavaScript instead of Firestore
+    visitors.sort((a, b) => {
+      const dateA = a.createdAt || new Date(0);
+      const dateB = b.createdAt || new Date(0);
+      return dateB.getTime() - dateA.getTime(); // Descending order
+    });
+
+    res.json({ success: true, visitors });
+  } catch (error) {
+    console.error('Error fetching visitors:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// UPDATED: Guard can request approval from resident
+app.post('/requestApproval', authenticateUser, async (req, res) => {
+  try {
+    const { visitorId } = req.body;
+    const userRole = req.user.role;
+
+    if (!['guard', 'admin'].includes(userRole)) {
+      return res.status(403).json({ error: 'Only guards can request approval' });
+    }
+
+    const visitorRef = db.collection('visitors').doc(visitorId);
+    const visitorSnap = await visitorRef.get();
+
+    if (!visitorSnap.exists) {
+      return res.status(404).json({ error: 'Visitor not found' });
+    }
+
+    const visitor = visitorSnap.data();
+
+    if (visitor.status !== 'pending') {
+      return res.status(400).json({ error: 'Visitor is not in pending status' });
+    }
+
+    // Update visitor with approval request timestamp
+    await visitorRef.update({
+      approvalRequestedAt: admin.firestore.FieldValue.serverTimestamp(),
+      approvalRequestedBy: req.user.uid
+    });
+
+    // Notify the resident household about approval request
+    const message = {
+      notification: {
+        title: 'Visitor Approval Required',
+        body: `${visitor.name} is at the gate. Please approve or deny entry.`
+      },
+      topic: `household_${visitor.hostHouseholdId}`,
+      data: {
+        visitorId: visitorId,
+        action: 'approval_request'
+      }
+    };
+
+    await messaging.send(message);
+
+    // Log event
+    await db.collection('events').add({
+      type: 'approval_requested',
+      actorUserId: req.user.uid,
+      subjectId: visitorId,
+      payload: { visitorName: visitor.name },
+      timestamp: admin.firestore.FieldValue.serverTimestamp()
+    });
+
+    res.json({ success: true, message: 'Approval request sent to resident' });
+  } catch (error) {
+    console.error('Error requesting approval:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
 app.post('/approveVisitor', authenticateUser, async (req, res) => {
   try {
     const { visitorId } = req.body;
@@ -84,7 +254,23 @@ app.post('/approveVisitor', authenticateUser, async (req, res) => {
       timestamp: admin.firestore.FieldValue.serverTimestamp()
     });
 
-    const message = {
+    // Notify guards that visitor is approved for check-in
+    const guardMessage = {
+      notification: {
+        title: 'Visitor Approved',
+        body: `${visitor.name} has been approved and can be checked in`
+      },
+      topic: 'guards',
+      data: {
+        visitorId: visitorId,
+        action: 'visitor_approved'
+      }
+    };
+
+    await messaging.send(guardMessage);
+
+    // Notify household
+    const householdMessage = {
       notification: {
         title: 'Visitor Approved',
         body: `${visitor.name} has been approved for entry`
@@ -92,7 +278,7 @@ app.post('/approveVisitor', authenticateUser, async (req, res) => {
       topic: `household_${visitor.hostHouseholdId}`
     };
 
-    await messaging.send(message);
+    await messaging.send(householdMessage);
 
     res.json({ success: true, message: 'Visitor approved successfully' });
   } catch (error) {
@@ -142,7 +328,23 @@ app.post('/denyVisitor', authenticateUser, async (req, res) => {
       timestamp: admin.firestore.FieldValue.serverTimestamp()
     });
 
-    const message = {
+    // Notify guards about denial
+    const guardMessage = {
+      notification: {
+        title: 'Visitor Denied',
+        body: `${visitor.name} entry has been denied`
+      },
+      topic: 'guards',
+      data: {
+        visitorId: visitorId,
+        action: 'visitor_denied'
+      }
+    };
+
+    await messaging.send(guardMessage);
+
+    // Notify household
+    const householdMessage = {
       notification: {
         title: 'Visitor Denied',
         body: `${visitor.name} entry has been denied`
@@ -150,7 +352,7 @@ app.post('/denyVisitor', authenticateUser, async (req, res) => {
       topic: `household_${visitor.hostHouseholdId}`
     };
 
-    await messaging.send(message);
+    await messaging.send(householdMessage);
 
     res.json({ success: true, message: 'Visitor denied successfully' });
   } catch (error) {
@@ -369,6 +571,25 @@ app.post('/chat', authenticateUser, async (req, res) => {
           }
         }
       });
+
+      tools.push({
+        type: 'function',
+        function: {
+          name: 'request_approval',
+          description: 'Request approval for a visitor from resident',
+          parameters: {
+            type: 'object',
+            properties: {
+              visitorName: {
+                type: 'string',
+                description: 'The exact name of the visitor to request approval for'
+              }
+            },
+            required: ['visitorName'],
+            additionalProperties: false
+          }
+        }
+      });
     }
 
     const completion = await openai.chat.completions.create({
@@ -380,8 +601,8 @@ app.post('/chat', authenticateUser, async (req, res) => {
           
 Current user role: ${userRole}
 Available actions:
-- Residents: approve/deny visitors for their household
-- Guards: check in/out approved visitors
+- Residents: add visitors, approve/deny visitors for their household
+- Guards: request approval from residents, check in/out approved visitors
 - Admins: all actions
 
 Be concise and helpful. Use the available functions to perform actions when requested.`
@@ -448,6 +669,9 @@ Be concise and helpful. Use the available functions to perform actions when requ
           break;
         case 'checkout_visitor':
           result = await executeCheckout(visitor.id, req.user);
+          break;
+        case 'request_approval':
+          result = await executeRequestApproval(visitor.id, req.user);
           break;
         default:
           result = { success: false, message: 'Unknown action' };
@@ -627,6 +851,46 @@ async function executeCheckout(visitorId, user) {
     return { success: true, message: `${visitor.name} has been checked out successfully` };
   } catch (error) {
     return { success: false, message: 'Error checking out visitor' };
+  }
+}
+
+async function executeRequestApproval(visitorId, user) {
+  try {
+    const visitorRef = db.collection('visitors').doc(visitorId);
+    const visitorSnap = await visitorRef.get();
+
+    if (!visitorSnap.exists) {
+      return { success: false, message: 'Visitor not found' };
+    }
+
+    const visitor = visitorSnap.data();
+
+    if (visitor.status !== 'pending') {
+      return { success: false, message: 'Visitor is not in pending status' };
+    }
+
+    await visitorRef.update({
+      approvalRequestedAt: admin.firestore.FieldValue.serverTimestamp(),
+      approvalRequestedBy: user.uid
+    });
+
+    const message = {
+      notification: {
+        title: 'Visitor Approval Required',
+        body: `${visitor.name} is at the gate. Please approve or deny entry.`
+      },
+      topic: `household_${visitor.hostHouseholdId}`,
+      data: {
+        visitorId: visitorId,
+        action: 'approval_request'
+      }
+    };
+
+    await messaging.send(message);
+
+    return { success: true, message: `Approval request sent for ${visitor.name}` };
+  } catch (error) {
+    return { success: false, message: 'Error requesting approval' };
   }
 }
 
